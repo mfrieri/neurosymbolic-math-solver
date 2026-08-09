@@ -19,18 +19,44 @@ class SymbolicSum(nn.Module):
 
     def __init__(self, n_digits=10):
         super().__init__()
+        self.n_digits = n_digits
+        self.n_sums = 2 * (n_digits - 1) + 1
         digits = torch.arange(n_digits, dtype=torch.float32)
 
         # sum_table[i, j] = i + j, via broadcasting a column against a row.
         sum_table = digits.unsqueeze(1) + digits.unsqueeze(0)
 
-        # A buffer, not a parameter: it moves with .to(device) and is saved in
-        # the state_dict, but the optimizer never touches it.
+        # sum_onehot[i, j, s] = 1 when i + j == s, else 0. Routes the joint
+        # distribution over digit pairs into a distribution over sums.
+        sum_onehot = torch.zeros(n_digits, n_digits, self.n_sums)
+        for i in range(n_digits):
+            for j in range(n_digits):
+                sum_onehot[i, j, i + j] = 1.0
+
+        # Buffers, not parameters: they move with .to(device) and are saved in
+        # the state_dict, but the optimizer never touches them.
         self.register_buffer("sum_table", sum_table)
+        self.register_buffer("sum_onehot", sum_onehot)
 
     def forward(self, p1, p2):
-        """p1, p2: (batch, n_digits) probabilities. Returns (batch,) sums."""
+        """Expected value of the sum. p1, p2: (batch, n_digits) probabilities.
+
+        Returns (batch,) floats. Constrains only the *mean* of each digit
+        distribution, so a CNN can satisfy it with a hedge -- e.g. representing
+        a 4 as half 3 and half 5. See sum_distribution for the fix.
+        """
         return torch.einsum("bi,bj,ij->b", p1, p2, self.sum_table)
+
+    def sum_distribution(self, p1, p2):
+        """Full distribution over possible sums.
+
+        P(sum = s) = sum over all (i, j) with i + j == s of P(d1=i) * P(d2=j)
+
+        Returns (batch, n_sums). Unlike the expected value, this penalises
+        hedged digit distributions: splitting a 4 between 3 and 5 smears
+        probability across two sums instead of concentrating it on one.
+        """
+        return torch.einsum("bi,bj,ijs->bs", p1, p2, self.sum_onehot)
 
 
 if __name__ == "__main__":
@@ -62,6 +88,23 @@ if __name__ == "__main__":
     loss.backward()
     print(f"gradient reaches inputs: {q1.grad is not None and q1.grad.abs().sum() > 0}")
 
+    # The distribution form: confident inputs put all mass on one sum.
+    dist = symbolic.sum_distribution(p1, p2)
+    print(f"\nsum_distribution shape: {tuple(dist.shape)}, total mass {dist.sum():.4f}")
+    print(f"one-hot 3 + one-hot 5 -> argmax sum {dist.argmax(dim=1).item()}")
+
+    # The hedge that fools the expected value: half 3 / half 5 against a
+    # certain 5 still averages to 9, but splits its mass across sums 8 and 10.
+    hedge = torch.zeros(1, 10)
+    hedge[0, 3] = 0.5
+    hedge[0, 5] = 0.5
+    print(f"\nhedged [.5 on 3, .5 on 5] + 5:")
+    print(f"  expected value -> {symbolic(hedge, p2).item():.4f}  (looks correct)")
+    hedge_dist = symbolic.sum_distribution(hedge, p2)
+    nonzero = [(s, round(v, 3)) for s, v in enumerate(hedge_dist[0].tolist()) if v > 0]
+    print(f"  distribution   -> {nonzero}  (mass on 8 and 10, none on 9)")
+
     assert symbolic(p1, p2).item() == 8.0
     assert sum(p.numel() for p in symbolic.parameters()) == 0
-    print("all checks passed")
+    assert torch.allclose(dist.sum(dim=1), torch.ones(1))
+    print("\nall checks passed")

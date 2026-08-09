@@ -37,6 +37,11 @@ class NeurosymbolicSolver(nn.Module):
         p1, p2 = self.digit_probs(images)
         return self.symbolic(p1, p2)
 
+    def sum_distribution(self, images):
+        """images: (batch, 1, 28, 56). Returns (batch, 19) sum probabilities."""
+        p1, p2 = self.digit_probs(images)
+        return self.symbolic.sum_distribution(p1, p2)
+
 
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
