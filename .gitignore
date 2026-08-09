@@ -227,5 +227,4 @@ claude/
 
 
 data/MNIST/
-outputs/figures/
 .venv/
